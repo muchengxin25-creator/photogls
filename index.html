@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>批量图片格式转换器 - 支持拖拽+HEIC</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: system-ui, sans-serif;
+        }
+        body {
+            max-width: 900px;
+            margin: 30px auto;
+            padding: 20px;
+            background: #f7f8fc;
+        }
+        .container {
+            background: white;
+            padding: 35px;
+            border-radius: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        }
+        h1 {
+            text-align: center;
+            color: #222;
+            margin-bottom: 8px;
+        }
+        .desc {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .drop-area {
+            border: 3px dashed #5f63f2;
+            border-radius: 12px;
+            padding: 50px 20px;
+            text-align: center;
+            background: #f9faff;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .drop-area.active {
+            background: #eef3ff;
+            border-color: #3949fc;
+        }
+        .file-input {
+            display: none;
+        }
+        .format-box {
+            margin: 25px 0;
+            text-align: center;
+        }
+        select {
+            padding: 11px 18px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            font-size: 15px;
+        }
+        .btn {
+            background: #5f63f2;
+            color: white;
+            border: none;
+            padding: 13px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            display: block;
+            margin: 0 auto;
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            text-align: center;
+            margin: 15px 0;
+            color: #e53935;
+        }
+        .file-list {
+            margin-top: 25px;
+        }
+        .item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 15px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .name {
+            color: #333;
+        }
+        .download {
+            color: #067aff;
+            text-decoration: none;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>📸 批量图片格式转换器</h1>
+    <p class="desc">支持拖拽 / 多选 / HEIC → JPG/PNG/WebP/BMP 批量转换</p>
+
+    <div class="drop-area" id="dropArea">
+        <h3>🖼️ 点击选择 或 拖拽图片到这里</h3>
+        <p style="margin-top:8px; color:#666">支持：JPG、PNG、WebP、HEIC、BMP、GIF</p>
+    </div>
+
+    <input type="file" class="file-input" id="fileInput" multiple accept="image/*,.heic,.HEIC">
+
+    <div class="format-box">
+        <label>转换为：&nbsp;</label>
+        <select id="targetFormat">
+            <option value="jpg">JPG</option>
+            <option value="png">PNG</option>
+            <option value="webp">WebP</option>
+            <option value="bmp">BMP</option>
+        </select>
+    </div>
+
+    <button class="btn" id="convertBtn" disabled>开始批量转换</button>
+    <div class="status" id="status"></div>
+    <div class="file-list" id="fileList"></div>
+</div>
+
+<script src="https://unpkg.com/heic2any@0.0.4/dist/heic2any.min.js"></script>
+<script>
+    const dropArea = document.getElementById('dropArea');
+    const fileInput = document.getElementById('fileInput');
+    const convertBtn = document.getElementById('convertBtn');
+    const status = document.getElementById('status');
+    const fileList = document.getElementById('fileList');
+    const targetFormat = document.getElementById('targetFormat');
+
+    let selectedFiles = [];
+
+    // === 阻止浏览器默认打开行为（核心修复）===
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+        document.addEventListener(evt, e => e.preventDefault(), false);
+    });
+
+    // 拖拽高亮
+    ['dragenter', 'dragover'].forEach(evt => {
+        dropArea.addEventListener(evt, () => dropArea.classList.add('active'));
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+        dropArea.addEventListener(evt, () => dropArea.classList.remove('active'));
+    });
+
+    // 拖拽放置
+    dropArea.addEventListener('drop', e => {
+        const files = Array.from(e.dataTransfer.files);
+        handleFiles(files);
+    });
+
+    // 点击选择
+    dropArea.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => handleFiles(Array.from(fileInput.files)));
+
+    // 处理文件
+    function handleFiles(files) {
+        const imgs = files.filter(f => f.type.startsWith('image/') || f.name.toLowerCase().endsWith('.heic'));
+        selectedFiles = imgs;
+        if (imgs.length > 0) {
+            convertBtn.disabled = false;
+            status.textContent = `已加载 ${imgs.length} 张图片`;
+        }
+    }
+
+    // 批量转换
+    convertBtn.addEventListener('click', async () => {
+        convertBtn.disabled = true;
+        status.textContent = '正在批量转换...';
+        fileList.innerHTML = '';
+
+        const format = targetFormat.value;
+
+        for (const file of selectedFiles) {
+            try {
+                let blob;
+                const isHeic = file.name.toLowerCase().endsWith('.heic');
+
+                if (isHeic) {
+                    blob = await heic2any({
+                        blob: file,
+                        toType: `image/${format === 'jpg' ? 'jpeg' : format}`,
+                        quality: 0.95
+                    });
+                } else {
+                    blob = await convertNormalImage(file, format);
+                }
+
+                const url = URL.createObjectURL(blob);
+                const originalName = file.name.replace(/\.[^/.]+$/, '');
+                const item = document.createElement('div');
+                item.className = 'item';
+                item.innerHTML = `
+                    <span class="name">${originalName}.${format}</span>
+                    <a class="download" href="${url}" download="${originalName}.${format}">下载</a>
+                `;
+                fileList.appendChild(item);
+
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        status.textContent = '✅ 全部转换完成！';
+        convertBtn.disabled = false;
+    });
+
+    // 普通图片转换
+    function convertNormalImage(file, fmt) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+
+                const mime = fmt === 'jpg' ? 'image/jpeg' : `image/${fmt}`;
+                canvas.toBlob(b => b ? resolve(b) : reject(), mime, 0.95);
+            };
+            img.onerror = reject;
+            img.src = URL.createObjectURL(file);
+        });
+    }
+</script>
+</body>
+</html>

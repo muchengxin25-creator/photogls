@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>批量图片格式转换器 - 支持拖拽+HEIC</title>
+    <title>批量图片格式转换器 - 支持拖拽+HEIC+企业微信无后缀表情</title>
     <style>
         * {
             margin: 0;
@@ -102,14 +102,14 @@
 
 <div class="container">
     <h1>📸 批量图片格式转换器</h1>
-    <p class="desc">支持拖拽 / 多选 / HEIC → JPG/PNG/WebP/BMP 批量转换</p>
+    <p class="desc">支持拖拽 / 多选 / HEIC / 企业微信无后缀UUID表情自动识别转换</p>
 
     <div class="drop-area" id="dropArea">
         <h3>🖼️ 点击选择 或 拖拽图片到这里</h3>
-        <p style="margin-top:8px; color:#666">支持：JPG、PNG、WebP、HEIC、BMP、GIF</p>
+        <p style="margin-top:8px; color:#666">支持：JPG、PNG、WebP、HEIC、BMP、GIF、企业微信无后缀表情文件</p>
     </div>
 
-    <input type="file" class="file-input" id="fileInput" multiple accept="image/*,.heic,.HEIC">
+    <input type="file" class="file-input" id="fileInput" multiple>
 
     <div class="format-box">
         <label>转换为：&nbsp;</label>
@@ -137,7 +137,7 @@
 
     let selectedFiles = [];
 
-    // === 阻止浏览器默认打开行为（核心修复）===
+    // 阻止浏览器默认打开行为
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
         document.addEventListener(evt, e => e.preventDefault(), false);
     });
@@ -160,13 +160,41 @@
     dropArea.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => handleFiles(Array.from(fileInput.files)));
 
-    // 处理文件
-    function handleFiles(files) {
-        const imgs = files.filter(f => f.type.startsWith('image/') || f.name.toLowerCase().endsWith('.heic'));
-        selectedFiles = imgs;
-        if (imgs.length > 0) {
+    // 二进制判断文件头，识别无后缀图片（企业微信表情核心逻辑）
+    async function detectRealType(file) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = e => {
+                const arr = new Uint8Array(e.target.result);
+                const head = arr.slice(0, 16);
+                let hex = '';
+                for (let b of head) hex += b.toString(16).padStart(2, '0');
+
+                if (hex.startsWith('89504e47')) return resolve('image/png');
+                if (hex.startsWith('ffd8ff')) return resolve('image/jpeg');
+                if (hex.startsWith('52494646') && hex.includes('57454250')) return resolve('image/webp');
+                if (hex.startsWith('47494638')) return resolve('image/gif');
+                resolve(file.type || 'application/octet-stream');
+            };
+            reader.readAsArrayBuffer(file.slice(0, 16));
+        });
+    }
+
+    // 处理文件，包含无后缀表情兼容
+    async function handleFiles(files) {
+        const valid = [];
+        for (let f of files) {
+            const mime = await detectRealType(f);
+            const isImg = mime.startsWith('image/') || f.name.toLowerCase().endsWith('.heic');
+            if (isImg) valid.push({ raw: f, mime });
+        }
+        selectedFiles = valid;
+        if (valid.length > 0) {
             convertBtn.disabled = false;
-            status.textContent = `已加载 ${imgs.length} 张图片`;
+            status.textContent = `已加载 ${valid.length} 个文件（含自动识别无后缀表情）`;
+        } else {
+            status.textContent = '未识别到有效图片';
+            convertBtn.disabled = true;
         }
     }
 
@@ -175,10 +203,11 @@
         convertBtn.disabled = true;
         status.textContent = '正在批量转换...';
         fileList.innerHTML = '';
+        const fmt = targetFormat.value;
 
-        const format = targetFormat.value;
-
-        for (const file of selectedFiles) {
+        for (const item of selectedFiles) {
+            const file = item.raw;
+            const mime = item.mime;
             try {
                 let blob;
                 const isHeic = file.name.toLowerCase().endsWith('.heic');
@@ -186,25 +215,29 @@
                 if (isHeic) {
                     blob = await heic2any({
                         blob: file,
-                        toType: `image/${format === 'jpg' ? 'jpeg' : format}`,
+                        toType: fmt === 'jpg' ? 'image/jpeg' : `image/${fmt}`,
                         quality: 0.95
                     });
                 } else {
-                    blob = await convertNormalImage(file, format);
+                    // 构造带真实mime的临时文件，解决无后缀无法加载问题
+                    const fixFile = new File([file], file.name, { type: mime });
+                    blob = await convertNormalImage(fixFile, fmt);
                 }
 
                 const url = URL.createObjectURL(blob);
-                const originalName = file.name.replace(/\.[^/.]+$/, '');
-                const item = document.createElement('div');
-                item.className = 'item';
-                item.innerHTML = `
-                    <span class="name">${originalName}.${format}</span>
-                    <a class="download" href="${url}" download="${originalName}.${format}">下载</a>
-                `;
-                fileList.appendChild(item);
+                const baseName = file.name.replace(/\.[^/.]+$/, '');
+                const outName = `${baseName}.${fmt}`;
 
+                const div = document.createElement('div');
+                div.className = 'item';
+                div.innerHTML = `
+                    <span class="name">${outName}</span>
+                    <a class="download" href="${url}" download="${outName}">下载</a>
+                `;
+                fileList.appendChild(div);
             } catch (err) {
                 console.error(err);
+                status.textContent += `\n${file.name} 转换失败`;
             }
         }
 
@@ -222,7 +255,6 @@
                 canvas.height = img.height;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0);
-
                 const mime = fmt === 'jpg' ? 'image/jpeg' : `image/${fmt}`;
                 canvas.toBlob(b => b ? resolve(b) : reject(), mime, 0.95);
             };

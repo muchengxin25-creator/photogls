@@ -2,13 +2,14 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>全能批量图片转换器</title>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: system-ui, sans-serif;
+            font-family: system-ui, -apple-system, sans-serif;
         }
         body {
             max-width: 960px;
@@ -17,7 +18,7 @@
             background: #f7f8fc;
         }
         .container {
-            background: white;
+            background: #ffffff;
             padding: 35px;
             border-radius: 16px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
@@ -41,7 +42,7 @@
             text-align: center;
             background: #f9faff;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.2s ease;
         }
         .drop-area.active {
             background: #eef3ff;
@@ -60,6 +61,7 @@
             border: 1px solid #ddd;
             font-size: 15px;
             min-width: 160px;
+            outline: none;
         }
         .btn-row {
             display: flex;
@@ -76,6 +78,7 @@
             border-radius: 8px;
             font-size: 16px;
             cursor: pointer;
+            transition: opacity 0.2s;
         }
         .btn-zip {
             background: #28a745;
@@ -83,6 +86,7 @@
         .btn:disabled {
             background: #ccc;
             cursor: not-allowed;
+            opacity: 0.7;
         }
         .status {
             text-align: center;
@@ -90,6 +94,8 @@
             color: #e53935;
             white-space: pre-line;
             min-height: 40px;
+            font-size: 14px;
+            padding: 4px;
         }
         .file-list {
             margin-top: 25px;
@@ -120,6 +126,30 @@
             font-weight: 500;
             white-space: nowrap;
         }
+        /* 进度条 */
+        .progress-wrap {
+            margin: 16px 0;
+            display: none;
+        }
+        .progress-text {
+            text-align: center;
+            font-size: 14px;
+            margin-bottom: 6px;
+            color: #333;
+        }
+        .progress-bg {
+            width: 100%;
+            height: 14px;
+            background: #eee;
+            border-radius: 99px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: #5f63f2;
+            transition: width 0.1s linear;
+        }
     </style>
 </head>
 <body>
@@ -144,7 +174,7 @@
             <option value="png">PNG</option>
             <option value="webp">WebP</option>
             <option value="bmp">BMP</option>
-            <option value="gif">GIF(动图)</option>
+            <option value="gif">GIF(单帧)</option>
             <option value="avif">AVIF(高压缩)</option>
             <option value="ico">ICO图标</option>
             <option value="tiff">TIFF</option>
@@ -156,217 +186,394 @@
         <button class="btn btn-zip" id="zipBtn" disabled>打包全部ZIP下载</button>
     </div>
 
+    <div class="progress-wrap" id="progressWrap">
+        <div class="progress-text" id="progressText">转换进度：0 / 0 (0%)</div>
+        <div class="progress-bg">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+    </div>
+
     <div class="status" id="status"></div>
     <div class="file-list" id="fileList"></div>
 </div>
 
-<!-- 外部依赖库 -->
+<!-- 外部依赖 -->
 <script src="https://unpkg.com/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
 
 <script>
-const dropArea = document.getElementById('dropArea');
-const fileInput = document.getElementById('fileInput');
-const convertBtn = document.getElementById('convertBtn');
-const zipBtn = document.getElementById('zipBtn');
-const status = document.getElementById('status');
-const fileList = document.getElementById('fileList');
-const targetFormat = document.getElementById('targetFormat');
+(function() {
+    // 全局常量配置（统一修改入口）
+    const CONFIG = {
+        MAX_FILE_SIZE: 30 * 1024 * 1024, // 30MB 单文件上限
+        MAX_CANVAS_SIZE: 1200,            // 画布最大宽高
+        GIF_TIMEOUT: 12000,               // GIF转换超时毫秒
+        PROGRESS_THROTTLE: 80,            // 进度更新节流间隔
+        MAX_GIF_WORKER: 2                 // gif.js 最大并发Worker
+    };
 
-let selectedFiles = [];
-let convertedBlobMap = new Map();
+    // DOM 元素缓存
+    const dom = {
+        dropArea: document.getElementById('dropArea'),
+        fileInput: document.getElementById('fileInput'),
+        convertBtn: document.getElementById('convertBtn'),
+        zipBtn: document.getElementById('zipBtn'),
+        status: document.getElementById('status'),
+        fileList: document.getElementById('fileList'),
+        targetFormat: document.getElementById('targetFormat'),
+        progressWrap: document.getElementById('progressWrap'),
+        progressText: document.getElementById('progressText'),
+        progressBar: document.getElementById('progressBar')
+    };
 
-// 阻止拖拽默认行为
-['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
-    document.addEventListener(evt, e => e.preventDefault(), false);
-});
+    // 全局状态
+    let state = {
+        selectedFiles: [],
+        convertedBlobMap: new Map(),
+        isConverting: false,
+        lastProgressTs: 0,
+        objectUrlList: [] // 统一管理URL用于释放
+    };
 
-// 拖拽高亮
-['dragenter', 'dragover'].forEach(evt => {
-    dropArea.addEventListener(evt, () => dropArea.classList.add('active'));
-});
-['dragleave', 'drop'].forEach(evt => {
-    dropArea.addEventListener(evt, () => dropArea.classList.remove('active'));
-});
-
-dropArea.addEventListener('drop', e => {
-    const files = Array.from(e.dataTransfer.files);
-    handleFiles(files);
-});
-dropArea.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => handleFiles(Array.from(fileInput.files)));
-
-// 文件头判断真实格式（适配无后缀企业微信表情）
-async function detectRealType(file) {
-    return new Promise(resolve => {
-        const reader = new FileReader();
-        reader.onloadend = e => {
-            const arr = new Uint8Array(e.target.result);
-            const head = arr.slice(0, 20);
-            let hex = '';
-            head.forEach(b => hex += b.toString(16).padStart(2, ''));
-
-            if (hex.startsWith('89504e47')) return resolve('image/png');
-            if (hex.startsWith('ffd8ff')) return resolve('image/jpeg');
-            if (hex.startsWith('52494646') && hex.includes('57454250')) return resolve('image/webp');
-            if (hex.startsWith('47494638')) return resolve('image/gif');
-            if (hex.startsWith('49492a00') || hex.startsWith('4d4d002a')) return resolve('image/tiff');
-            if (hex.startsWith('00000100')) return resolve('image/x-icon');
-            resolve(file.type || 'application/octet-stream');
-        };
-        reader.readAsArrayBuffer(file.slice(0, 20));
-    });
-}
-
-async function handleFiles(files) {
-    const valid = [];
-    for (const f of files) {
-        const mime = await detectRealType(f);
-        const ext = f.name.toLowerCase().split('.').pop();
-        const isHeic = ext === 'heic';
-        const isSvg = ext === 'svg' || mime.includes('svg');
-        const isImage = mime.startsWith('image/') || isHeic || isSvg;
-        if (isImage) valid.push({ raw: f, mime });
-    }
-    selectedFiles = valid;
-    convertedBlobMap.clear();
-    fileList.innerHTML = '';
-    zipBtn.disabled = true;
-    if (valid.length > 0) {
-        convertBtn.disabled = false;
-        status.textContent = `已加载 ${valid.length} 个图片文件（含自动识别无后缀表情）`;
-    } else {
-        status.textContent = '未识别到有效图片文件';
-        convertBtn.disabled = true;
-    }
-}
-
-// 基础图片转Blob（Canvas渲染）
-function drawImageToBlob(file, mimeOut, quality = 0.92) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.clearRect(0,0,canvas.width,canvas.height);
-            ctx.drawImage(img,0,0);
-            canvas.toBlob(b => b ? resolve(b) : reject(), mimeOut, quality);
-        };
-        img.onerror = reject;
-        img.src = URL.createObjectURL(file);
-    });
-}
-
-// 单个文件转换入口
-async function convertSingle(item, fmt) {
-    const file = item.raw;
-    const mimeIn = item.mime;
-    let blob, mimeTarget, outExt;
-
-    switch(fmt) {
-        case 'jpg': mimeTarget = 'image/jpeg'; outExt = 'jpg'; break;
-        case 'png': mimeTarget = 'image/png'; outExt = 'png'; break;
-        case 'webp': mimeTarget = 'image/webp'; outExt = 'webp'; break;
-        case 'bmp': mimeTarget = 'image/bmp'; outExt = 'bmp'; break;
-        case 'avif': mimeTarget = 'image/avif'; outExt = 'avif'; break;
-        case 'ico': mimeTarget = 'image/x-icon'; outExt = 'ico'; break;
-        case 'tiff': mimeTarget = 'image/tiff'; outExt = 'tiff'; break;
-        case 'gif': mimeTarget = 'image/gif'; outExt = 'gif'; break;
-        default: mimeTarget='image/png';outExt='png';
-    }
-
-    // HEIC特殊处理
-    if(file.name.toLowerCase().endsWith('heic')){
-        blob = await heic2any({ blob: file, toType: mimeTarget==='image/jpeg'?'image/jpeg':'image/png', quality:0.95 });
-        return { blob, outExt };
-    }
-
-    // SVG处理
-    if(mimeIn.includes('svg') || file.name.toLowerCase().endsWith('svg')){
-        const svgText = await file.text();
-        const svgBlob = new Blob([svgText], {type:'image/svg+xml'});
-        const svgFile = new File([svgBlob], file.name, {type:'image/svg+xml'});
-        blob = await drawImageToBlob(svgFile, mimeTarget);
-        return { blob, outExt };
-    }
-
-    // 普通静态图
-    const fixFile = new File([file], file.name, {type: mimeIn});
-    if(fmt !== 'gif'){
-        blob = await drawImageToBlob(fixFile, mimeTarget);
-        return { blob, outExt };
-    }
-
-    // 转GIF动图（简易首帧方案，如需逐帧动图可再扩展）
-    const img = new Image();
-    await new Promise((res, rej)=>{
-        img.onload=res; img.onerror=rej; img.src=URL.createObjectURL(fixFile);
-    });
-    const canvas = document.createElement('canvas');
-    canvas.width = img.width; canvas.height = img.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img,0,0);
-    const gif = new GIF({ workers:2, quality:10 });
-    gif.addFrame(canvas, {delay:200});
-    return new Promise((res, rej)=>{
-        gif.on('finished', b=>res({blob:b, outExt:'gif'}));
-        gif.on('error',rej);
-        gif.render();
-    });
-}
-
-// 批量转换按钮
-convertBtn.addEventListener('click', async () => {
-    convertBtn.disabled = true;
-    zipBtn.disabled = true;
-    status.textContent = '批量转换进行中...';
-    fileList.innerHTML = '';
-    convertedBlobMap.clear();
-    const fmt = targetFormat.value;
-    let succ = 0, fail = 0;
-
-    for(const item of selectedFiles){
-        const origName = item.raw.name.replace(/\.[^/.]+$/, '');
-        try{
-            const {blob, outExt} = await convertSingle(item, fmt);
-            const finalName = `${origName}.${outExt}`;
-            const url = URL.createObjectURL(blob);
-            convertedBlobMap.set(finalName, blob);
-
-            const div = document.createElement('div');
-            div.className = 'item';
-            div.innerHTML = `
-                <span class="name">${finalName}</span>
-                <a class="download" href="${url}" download="${finalName}">下载</a>
-            `;
-            fileList.appendChild(div);
-            succ++;
-        }catch(e){
-            fail++;
-            console.error(item.raw.name, e);
+    // 初始化：检测依赖加载状态
+    function checkDependencies() {
+        const missing = [];
+        if (typeof heic2any === 'undefined') missing.push('heic2any');
+        if (typeof GIF === 'undefined') missing.push('gif.js');
+        if (typeof JSZip === 'undefined') missing.push('JSZip');
+        if (typeof saveAs === 'undefined') missing.push('FileSaver');
+        if (missing.length > 0) {
+            dom.status.textContent = `⚠️ 网络异常，依赖加载失败：${missing.join(',')}，请刷新重试`;
+            return false;
         }
+        return true;
     }
-    status.textContent = `✅ 转换完成：成功${succ}个，失败${fail}个`;
-    if(succ>0) zipBtn.disabled = false;
-    convertBtn.disabled = false;
-});
 
-// 打包ZIP下载
-zipBtn.addEventListener('click', async () => {
-    if(convertedBlobMap.size === 0) return;
-    zipBtn.disabled = true;
-    status.textContent = '正在打包ZIP...';
-    const zip = new JSZip();
-    convertedBlobMap.forEach((blob, name)=> zip.file(name, blob));
-    const zipBlob = await zip.generateAsync({type:'blob'});
-    saveAs(zipBlob, '转换图片包.zip');
-    status.textContent = '📦 ZIP打包下载已触发';
-    zipBtn.disabled = false;
-});
+    // 释放所有创建的 ObjectURL，防止内存泄漏
+    function revokeAllObjectUrls() {
+        state.objectUrlList.forEach(url => {
+            try { URL.revokeObjectURL(url); } catch(e) {}
+        });
+        state.objectUrlList = [];
+    }
+
+    // 生成并托管 URL
+    function createManagedUrl(blob) {
+        const url = URL.createObjectURL(blob);
+        state.objectUrlList.push(url);
+        return url;
+    }
+
+    // 文件名清洗（去除非法字符）
+    function cleanFileName(name) {
+        return name.replace(/[\\\/:*?"<>|]/g, '_').substring(0, 120);
+    }
+
+    // 二进制文件头识别真实图片类型（适配无后缀企业微信表情）
+    async function detectRealType(file) {
+        return new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onloadend = e => {
+                const arr = new Uint8Array(e.target.result);
+                const head = arr.slice(0, 20);
+                let hex = '';
+                head.forEach(b => hex += b.toString(16).padStart(2, ''));
+
+                if (hex.startsWith('89504e47')) return resolve('image/png');
+                if (hex.startsWith('ffd8ff')) return resolve('image/jpeg');
+                if (hex.startsWith('52494646') && hex.includes('57454250')) return resolve('image/webp');
+                if (hex.startsWith('47494638')) return resolve('image/gif');
+                if (hex.startsWith('49492a00') || hex.startsWith('4d4d002a')) return resolve('image/tiff');
+                if (hex.startsWith('00000100')) return resolve('image/x-icon');
+                resolve(file.type || 'application/octet-stream');
+            };
+            reader.readAsArrayBuffer(file.slice(0, 20));
+        });
+    }
+
+    // 文件去重判断
+    function isFileExist(list, file) {
+        return list.some(item => item.raw.name === file.name && item.raw.size === file.size);
+    }
+
+    // 处理选择/拖拽文件
+    async function handleFiles(rawFiles) {
+        if (!checkDependencies()) return;
+        revokeAllObjectUrls();
+        state.convertedBlobMap.clear();
+        dom.fileList.innerHTML = '';
+        dom.zipBtn.disabled = true;
+        dom.progressWrap.style.display = 'none';
+
+        const validItems = [];
+        const skipMsg = [];
+
+        for (const f of rawFiles) {
+            // 超大文件拦截
+            if (f.size > CONFIG.MAX_FILE_SIZE) {
+                skipMsg.push(`${f.name} 超过${(CONFIG.MAX_FILE_SIZE/1024/1024).toFixed(0)}MB，已跳过`);
+                continue;
+            }
+            const mime = await detectRealType(f);
+            const ext = f.name.toLowerCase().split('.').pop();
+            const isHeic = ext === 'heic';
+            const isSvg = ext === 'svg' || mime.includes('svg');
+            const isImage = mime.startsWith('image/') || isHeic || isSvg;
+
+            if (!isImage) continue;
+            // 去重
+            if (isFileExist(state.selectedFiles, f)) continue;
+            validItems.push({ raw: f, mime });
+        }
+
+        state.selectedFiles = validItems;
+        dom.convertBtn.disabled = validItems.length === 0;
+
+        let tip = '';
+        if (validItems.length) tip = `已加载 ${validItems.length} 个图片文件（含自动识别无后缀表情）`;
+        if (skipMsg.length) tip += '\n' + skipMsg.join('\n');
+        dom.status.textContent = tip;
+    }
+
+    // 画布等比例缩小，防止超大图内存溢出
+    function resizeCanvas(img) {
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        if (w > CONFIG.MAX_CANVAS_SIZE || h > CONFIG.MAX_CANVAS_SIZE) {
+            const ratio = Math.min(CONFIG.MAX_CANVAS_SIZE / w, CONFIG.MAX_CANVAS_SIZE / h);
+            w = Math.round(w * ratio);
+            h = Math.round(h * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        return canvas;
+    }
+
+    // 普通图片转Blob
+    function drawImageToBlob(file, mimeOut, quality = 0.92) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = resizeCanvas(img);
+                canvas.toBlob(b => b ? resolve(b) : reject(new Error('生成Blob为空')), mimeOut, quality);
+            };
+            img.onerror = reject;
+            img.src = createManagedUrl(file);
+        });
+    }
+
+    // 高健壮 GIF 转换（超时+销毁+异常兜底）
+    function imageToGif(file) {
+        return new Promise(async (resolve, reject) => {
+            let timer = null;
+            let gifInstance = null;
+
+            const cleanup = (err) => {
+                clearTimeout(timer);
+                if (gifInstance) {
+                    try { gifInstance.abort(); } catch(e) {}
+                }
+                if (err) reject(err);
+            };
+
+            timer = setTimeout(() => {
+                cleanup(new Error(`GIF转换超时${CONFIG.GIF_TIMEOUT/1000}秒，图片过大`));
+            }, CONFIG.GIF_TIMEOUT);
+
+            try {
+                const img = new Image();
+                await new Promise((res, rej) => {
+                    img.onload = res;
+                    img.onerror = rej;
+                    img.src = createManagedUrl(file);
+                });
+                const canvas = resizeCanvas(img);
+
+                gifInstance = new GIF({ workers: CONFIG.MAX_GIF_WORKER, quality: 15 });
+                gifInstance.addFrame(canvas, { delay: 250 });
+
+                gifInstance.on('finished', blob => {
+                    cleanup();
+                    resolve(blob);
+                });
+                gifInstance.on('error', err => {
+                    cleanup(err);
+                });
+                gifInstance.render();
+            } catch (e) {
+                cleanup(e);
+            }
+        });
+    }
+
+    // 单个文件转换逻辑
+    async function convertSingle(item, fmt) {
+        const file = item.raw;
+        const mimeIn = item.mime;
+        let blob, mimeTarget, outExt;
+
+        const map = {
+            jpg: { mime: 'image/jpeg', ext: 'jpg' },
+            png: { mime: 'image/png', ext: 'png' },
+            webp: { mime: 'image/webp', ext: 'webp' },
+            bmp: { mime: 'image/bmp', ext: 'bmp' },
+            avif: { mime: 'image/avif', ext: 'avif' },
+            ico: { mime: 'image/x-icon', ext: 'ico' },
+            tiff: { mime: 'image/tiff', ext: 'tiff' },
+            gif: { mime: 'image/gif', ext: 'gif' }
+        };
+        const target = map[fmt] || map.png;
+        mimeTarget = target.mime;
+        outExt = target.ext;
+
+        // HEIC
+        if (file.name.toLowerCase().endsWith('heic')) {
+            const heicMime = mimeTarget === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+            blob = await heic2any({ blob: file, toType: heicMime, quality: 0.95 });
+            return { blob, outExt };
+        }
+
+        // SVG
+        if (mimeIn.includes('svg') || file.name.toLowerCase().endsWith('svg')) {
+            const svgText = await file.text();
+            const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
+            const svgFile = new File([svgBlob], file.name, { type: 'image/svg+xml' });
+            if (fmt === 'gif') blob = await imageToGif(svgFile);
+            else blob = await drawImageToBlob(svgFile, mimeTarget);
+            return { blob, outExt };
+        }
+
+        // 普通图片
+        const fixFile = new File([file], file.name, { type: mimeIn });
+        if (fmt !== 'gif') {
+            blob = await drawImageToBlob(fixFile, mimeTarget);
+        } else {
+            blob = await imageToGif(fixFile);
+        }
+        return { blob, outExt };
+    }
+
+    // 更新进度（节流防抖动）
+    function updateProgress(done, total) {
+        const now = Date.now();
+        if (now - state.lastProgressTs < CONFIG.PROGRESS_THROTTLE) return;
+        state.lastProgressTs = now;
+        const pct = Math.round((done / total) * 100);
+        dom.progressText.textContent = `转换进度：${done} / ${total} (${pct}%)`;
+        dom.progressBar.style.width = `${pct}%`;
+    }
+
+    // 批量转换入口
+    dom.convertBtn.addEventListener('click', async () => {
+        if (state.isConverting || state.selectedFiles.length === 0) return;
+        if (!checkDependencies()) return;
+
+        state.isConverting = true;
+        dom.convertBtn.disabled = true;
+        dom.zipBtn.disabled = true;
+        dom.status.textContent = '批量转换进行中...';
+        dom.fileList.innerHTML = '';
+        state.convertedBlobMap.clear();
+        revokeAllObjectUrls();
+        dom.progressWrap.style.display = 'block';
+
+        const total = state.selectedFiles.length;
+        let done = 0, succ = 0, fail = 0;
+        const fmt = dom.targetFormat.value;
+        const errorLogs = [];
+
+        for (const item of state.selectedFiles) {
+            const origName = cleanFileName(item.raw.name.replace(/\.[^/.]+$/, ''));
+            try {
+                const res = await convertSingle(item, fmt);
+                const finalName = `${origName}.${res.outExt}`;
+                const url = createManagedUrl(res.blob);
+                state.convertedBlobMap.set(finalName, res.blob);
+
+                const div = document.createElement('div');
+                div.className = 'item';
+                div.innerHTML = `
+                    <span class="name">${finalName}</span>
+                    <a class="download" href="${url}" download="${finalName}">下载</a>
+                `;
+                dom.fileList.appendChild(div);
+                succ++;
+            } catch (e) {
+                fail++;
+                errorLogs.push(`${item.raw.name}：${e.message}`);
+                console.error('转换失败', item.raw.name, e);
+            }
+            done++;
+            updateProgress(done, total);
+        }
+
+        state.isConverting = false;
+        let statusText = `✅ 转换完成：成功${succ}个，失败${fail}个`;
+        if (errorLogs.length) statusText += '\n失败列表：\n' + errorLogs.join('\n');
+        dom.status.textContent = statusText;
+        dom.progressText.textContent = `转换进度：${total}/${total} (100%)`;
+        dom.progressBar.style.width = '100%';
+        if (succ > 0) dom.zipBtn.disabled = false;
+        dom.convertBtn.disabled = false;
+    });
+
+    // ZIP打包下载
+    dom.zipBtn.addEventListener('click', async () => {
+        if (state.isConverting || state.convertedBlobMap.size === 0) return;
+        if (!checkDependencies()) return;
+
+        dom.zipBtn.disabled = true;
+        dom.status.textContent = '正在打包ZIP压缩包...';
+        try {
+            const zip = new JSZip();
+            state.convertedBlobMap.forEach((blob, name) => zip.file(name, blob));
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            saveAs(zipBlob, cleanFileName('图片转换包') + '.zip');
+            dom.status.textContent = '📦 ZIP打包下载已触发';
+        } catch (e) {
+            dom.status.textContent = `❌ ZIP打包失败：${e.message}`;
+            console.error(e);
+        }
+        dom.zipBtn.disabled = false;
+    });
+
+    // 拖拽全局阻止默认行为
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+        document.addEventListener(evt, e => e.preventDefault(), false);
+    });
+
+    // 拖拽高亮样式
+    ['dragenter', 'dragover'].forEach(evt => {
+        dom.dropArea.addEventListener(evt, () => dom.dropArea.classList.add('active'));
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+        dom.dropArea.addEventListener(evt, () => dom.dropArea.classList.remove('active'));
+    });
+
+    // 拖拽放置
+    dom.dropArea.addEventListener('drop', e => {
+        const files = Array.from(e.dataTransfer.files);
+        handleFiles(files);
+    });
+
+    // 点击唤起选择文件
+    dom.dropArea.addEventListener('click', () => dom.fileInput.click());
+    dom.fileInput.addEventListener('change', () => handleFiles(Array.from(dom.fileInput.files)));
+
+    // 页面卸载清理资源
+    window.addEventListener('beforeunload', () => {
+        revokeAllObjectUrls();
+    });
+
+    // 初始化依赖检测
+    checkDependencies();
+})();
 </script>
 </body>
 </html>
